@@ -78,11 +78,14 @@ async def scrape_all_stores() -> List[Dict]:
         else: prof_score = 0
         
         total = brand_score + disc_score + prof_score
-        if total >= 8: score, s30 = "S", 60
-        elif total >= 6: score, s30 = "A", 45
-        elif total >= 4: score, s30 = "B", 30
-        elif total >= 2: score, s30 = "C", 15
-        else: score, s30 = "D", 8
+        # Flip Score 1-100
+        score_num = int((total + 1) * 11.1)  # 0-9 → 11-100
+        score_num = max(1, min(100, score_num))
+        if total >= 8: score, s30, label = score_num, 60, "🔥 Insane"
+        elif total >= 6: score, s30, label = score_num, 45, "⚡ Gold"
+        elif total >= 4: score, s30, label = score_num, 30, "👍 Good"
+        elif total >= 2: score, s30, label = score_num, 15, "🆗 Okay"
+        else: score, s30, label = score_num, 8, "🤷 Meh"
         
         cat_m = CAT_MULT.get(cat, 1.25)
         hot_mult = 1.4 if brand_score >= 2 else 1.0

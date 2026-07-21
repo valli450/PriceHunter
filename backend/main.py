@@ -47,6 +47,57 @@ def hot_deals_html(min_discount: float = 0, store: str = None):
     return render_page(deals)
 
 
+@app.get("/api/competition")
+def competition(q: str = ""):
+    """Сколько конкурентов продают этот товар на eBay?"""
+    import httpx
+    try:
+        url = f"https://www.ebay.com/sch/i.html?_nkw={__import__('urllib.parse').quote(q[:80])}&_sop=15&LH_Complete=1&LH_Sold=1"
+        r = httpx.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, follow_redirects=True)
+        if r.status_code == 200:
+            import re
+            # Try to extract count from "Results" text
+            m = re.search(r'([0-9,]+)\s*Results', r.text)
+            if m:
+                count = int(m.group(1).replace(",", ""))
+            else:
+                count = r.text.count('class="s-item"')
+            badge = "🟢 Low" if count < 20 else "🟡 Medium" if count < 100 else "🔴 High"
+            return {"count": count, "badge": badge, "label": f"{badge} ({count} active listings)"}
+        return {"count": 0, "badge": "⚪ Unknown", "label": "⚪ No data"}
+    except:
+        return {"count": 0, "badge": "⚪ Unknown", "label": "⚪ No data"}
+
+@app.get("/api/compare")
+def compare(q: str = ""):
+    """Найти этот товар в других магазинах."""
+    if not q:
+        return []
+    deals = get_hot_deals(limit=500, min_discount=0)
+    words = q.lower().split()[:5]
+    matches = []
+    store_icons = {"target":"🎯","walmart":"🛒","amazon":"📦","costco":"🏬","homedepot":"🧰","lowes":"🪴"}
+    for d in deals:
+        title = d["title"].lower()
+        score = sum(1 for w in words if w in title)
+        if score >= 2 and len(words) >= 3:
+            matches.append({"store": d["store"], "price": d["current_price"], "orig": d["original_price"],
+                            "dp": d["discount_pct"], "profit": d.get("profit_est", 0),
+                            "roi": d.get("roi_pct", 0), "title": d["title"][:60],
+                            "icon": store_icons.get(d["store"], "🏪"),
+                            "url": d.get("affiliate_url", d.get("url", ""))})
+    return sorted(matches, key=lambda x: x["price"])[:5]
+
+
+@app.get("/api/barcode")
+def barcode(upc: str = ""):
+    if not upc or len(upc) < 3:
+        return {"found": False, "deals": []}
+    deals = get_hot_deals(limit=500, min_discount=0)
+    matches = [d for d in deals if upc in d["title"] or upc[-4:] in d["title"]]
+    return {"found": len(matches) > 0, "deals": matches[:5]}
+
+
 @app.get("/api/deals/{deal_id}/history")
 def deal_history(deal_id: str, days: int = 30):
     from backend.database import get_price_history
@@ -118,9 +169,48 @@ def dashboard():
     total_profit = round(sum(d.get("profit_est", 0) for d in deals), 2)
     top10 = sorted(deals, key=lambda d: d.get("profit_est", 0), reverse=True)[:10]
     
+    # Build trend tiles, sell-through rows, heatmap
     store_icons = {"bestbuy":"🔵","walmart":"🛒","target":"🎯","amazon":"📦"}
     store_colors = {"target":"#e0443d","walmart":"#ffc120","amazon":"#ff9900","bestbuy":"#0046be"}
+    cat_items = sorted(by_cat.items(), key=lambda x: -x[1])[:10]
+    cat_roi, cat_sold, hm = {}, {}, {}
+    for d in deals:
+        k, r, s, st = d.get("category","other"), d.get("roi_pct",0), d.get("sold_30d",0), d["store"]
+        cat_roi[k] = cat_roi.get(k,0) + r; cat_sold[k] = cat_sold.get(k,0) + s; hm[(st,k)] = hm.get((st,k),0) + r
+    for k in cat_roi: cat_roi[k] = round(cat_roi[k]/by_cat.get(k,1), 1)
+    for k in cat_sold: cat_sold[k] = round(cat_sold[k]/by_cat.get(k,1), 1)
+    for k in hm: hm[k] = round(hm[k]/max(1,by_store.get(k[0],1)), 1)
+    
+    trend_tiles = "".join(
+        f'<div style="background:#1a1210;border:1px solid #2a1e1e;border-radius:6px;padding:6px;text-align:center">'
+        f'<div style="color:{"#2ed573" if cat_roi.get(c,0)>=35 else "#ffd93d" if cat_roi.get(c,0)>=25 else "#e57373" if cat_roi.get(c,0)>=15 else "#636e72"};font-weight:700">{cat_roi.get(c,0):.0f}%</div>'
+        f'<div style="color:#7a6a62;font-size:.85em">{n}</div>'
+        f'<div style="color:#5a4a42;font-size:.8em">{c[:5]+"." if len(c)>5 else c}</div></div>'
+        for c,n in cat_items)
+    sell_rows = "".join(
+        f'<tr><td>{c}</td><td style="color:#ffd93d">{cat_sold.get(c,0):.0f}</td><td>{30/max(1,cat_sold.get(c,0)):.0f}d</td><td>{"⚡Fast" if cat_sold.get(c,0)>=40 else "👍Normal" if cat_sold.get(c,0)>=20 else "🐢Slow"}</td></tr>'
+        for c,_ in cat_items[:8])
+    store_list = sorted(by_store.items(), key=lambda x: -x[1])
+    hm_header = "".join(f'<td style="text-align:center;font-size:.9em">{store_icons.get(s,"🏪")}</td>' for s,_ in store_list)
+    hm_body = "".join(
+        f'<tr><td style="color:#b09880">{c[:5]}</td>'
+        + "".join(f'<td style="text-align:center;background:{"#2ed573" if hm.get((s,c),0)>=35 else "#ffd93d" if hm.get((s,c),0)>=25 else "#e57373" if hm.get((s,c),0)>0 else "#1a1210"};color:#0c0a0a;font-weight:600;border-radius:3px">{hm.get((s,c),0):.0f}%</td>' for s,_ in store_list)
+        + '</tr>'
+        for c,_ in cat_items[:6])
+    
+    store_colors = {"target":"#e0443d","walmart":"#ffc120","amazon":"#ff9900","bestbuy":"#0046be"}
     cat_colors = ["#ff6b35","#ffd93d","#2ed573","#00d2d3","#a29bfe","#fd79a8","#e17055","#6c5ce7","#00b894","#fdcb6e","#e84393","#636e72"]
+    
+    # Trend radar + sell-through + heatmap data
+    cat_roi, cat_sold, hm = {}, {}, {}
+    for d in deals:
+        k, r, s, st = d.get("category","other"), d.get("roi_pct",0), d.get("sold_30d",0), d["store"]
+        cat_roi[k] = cat_roi.get(k,0) + r
+        cat_sold[k] = cat_sold.get(k,0) + s
+        hm[(st,k)] = hm.get((st,k),0) + r
+    for k in cat_roi: cat_roi[k] = round(cat_roi[k]/by_cat.get(k,1), 1)
+    for k in cat_sold: cat_sold[k] = round(cat_sold[k]/by_cat.get(k,1), 1)
+    for k in hm: hm[k] = round(hm[k]/max(1,by_store.get(k[0],1)), 1)
     
     # Pie chart
     store_data = [(s, c, store_icons.get(s,"🏪"), store_colors.get(s,"#888")) for s, c in sorted(by_store.items(), key=lambda x: -x[1])]
@@ -196,6 +286,24 @@ a{{color:#ff6b35;text-decoration:none}}
 {pie_slices}
 <text x="50" y="55" text-anchor="middle" font-size="8" fill="#ece5e0" font-weight="700">{total} deals</text>
 </svg>
+</div>
+<div class="chart">
+<h2>📈 Trend Radar</h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:4px;font-size:.68em">{trend_tiles}</div>
+</div>
+<div class="chart">
+<h2>⏱ Sell-Through Rate</h2>
+<table style="font-size:.76em">
+<tr style="color:#7a6a62"><td>Category</td><td>Sold/mo</td><td>Days</td><td>Speed</td></tr>
+{sell_rows}
+</table>
+</div>
+<div class="chart">
+<h2>🗺️ Margin Heatmap</h2>
+<table style="font-size:.7em;width:100%">
+<tr style="color:#7a6a62"><td>Cat.</td>{hm_header}</tr>
+{hm_body}
+</table>
 </div>
 <div class="chart">
 <h2>🏆 Top 10 by Profit</h2>
@@ -302,6 +410,14 @@ function openM(i){
       '<a class="mplink" href="'+(d.sell_urls[pk[qi]]||d.sell_urls.eBay)+'" target="_blank">></a></div>';
   }
   h+='<div id="phc" style="margin-top:8px;height:50px"></div>';
+  h+='<div style="margin-top:10px;padding-top:10px;border-top:1px solid #2a1e1e">';
+  h+='<div style="font-size:.78em;color:#b09880;margin-bottom:6px">💰 Net Profit Calculator</div>';
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;font-size:.78em">';
+  h+='<input id="pc_sale" placeholder="Sale $" value="'+d.avg_r.toFixed(0)+'" style="width:70px;background:#1a1210;border:1px solid #3a2820;color:#ece5e0;padding:4px 8px;border-radius:6px;outline:none">';
+  h+='<select id="pc_plat" style="background:#1a1210;border:1px solid #3a2820;color:#ece5e0;padding:4px 6px;border-radius:6px;outline:none;font-size:.9em"><option value="0.135">eBay 13.5%</option><option value="0.15">Amazon 15%</option><option value="0.10">Mercari 10%</option><option value="0">FB Mkt 0%</option><option value="0">OfferUp 0%</option></select>';
+  h+='<input id="pc_ship" placeholder="Ship $" value="0" style="width:60px;background:#1a1210;border:1px solid #3a2820;color:#ece5e0;padding:4px 8px;border-radius:6px;outline:none">';
+  h+='<select id="pc_state" style="background:#1a1210;border:1px solid #3a2820;color:#ece5e0;padding:4px 6px;border-radius:6px;outline:none;font-size:.9em"><option value="0">State tax</option><option value="0">— No tax —</option><option value="0.1025">CA 10.25%</option><option value="0.10">WA 10%</option><option value="0.0975">TN 9.75%</option><option value="0.095">LA 9.5%</option><option value="0.0925">AR 9.25%</option><option value="0.09">NY 9%</option><option value="0.0875">IL 8.75%</option><option value="0.08">TX 8%</option><option value="0.0725">FL 7.25%</option><option value="0.07">NJ 7%</option><option value="0.065">MA 6.5%</option><option value="0.06">PA 6%</option><option value="0.0475">MI 4.75%</option><option value="0.04">HI 4%</option><option value="0">OR 0%</option><option value="0">NH 0%</option><option value="0">DE 0%</option><option value="0">MT 0%</option></select>';
+  h+='</div><div id="pc_result" style="margin-top:6px;font-size:.82em;color:#2ed573;font-weight:600"></div></div>';
   document.getElementById('mo').innerHTML=h;
   // Fetch price history and render sparkline
   var xhr=new XMLHttpRequest();
@@ -318,8 +434,35 @@ function openM(i){
     var color=prices[prices.length-1]<prices[0]?'#2ed573':'#e8835a';
     var svg='<svg width="'+w+'" height="'+h2+'" viewBox="0 0 '+w+' '+h2+'" style="width:100%;max-width:200px"><polyline fill="none" stroke="'+color+'" stroke-width="2" points="'+pts+'"/><text x="0" y="10" fill="#7a6a62" font-size="9">$'+min.toFixed(0)+'</text><text x="'+(w-30)+'" y="10" fill="#7a6a62" font-size="9">$'+max.toFixed(0)+'</text></svg>';
     document.getElementById('phc').innerHTML=svg;
+    // ML Predictor: price drop probability
+    if(prices.length>=4){
+      var recent=prices.slice(-4);
+      var drops=0;
+      for(var pi=1;pi<recent.length;pi++){if(recent[pi]<recent[pi-1]){drops++;}}
+      var prob=Math.round((drops/(recent.length-1))*100);
+      var direction=drops>=3?'📉 Likely to drop further ('+prob+'%)':'📈 Stable or rising ('+prob+'% stability)';
+      document.getElementById('phc').innerHTML+=direction;
+    }
   };
   xhr.send();
+  // Profit calculator
+  setTimeout(function(){
+    var inputs=document.querySelectorAll('#pc_sale,#pc_plat,#pc_ship,#pc_tax,#pc_state');
+    function calc(){
+      var sale=parseFloat(document.getElementById('pc_sale').value)||0;
+      var fee=parseFloat(document.getElementById('pc_plat').value)||0;
+      var ship=parseFloat(document.getElementById('pc_ship').value)||0;
+      var stateTax=parseFloat(document.getElementById('pc_state').value)||0;
+      var tax=(parseFloat(document.getElementById('pc_tax').value)||0)+(sale*stateTax);
+      var cost=d.cp;
+      var net=sale-sale*fee-ship-tax-cost;
+      var el=document.getElementById('pc_result');
+      el.innerHTML='Buy $'+cost.toFixed(0)+' → Net <strong>$'+net.toFixed(0)+'</strong> (ROI '+((net/cost)*100).toFixed(0)+'%)';
+      el.style.color=net>0?'#2ed573':'#e57373';
+    }
+    inputs.forEach(function(el){el.addEventListener('input',calc);});
+    calc();
+  },100);
 }
 function closeM(){document.getElementById('ov').classList.remove('s');document.getElementById('mo').innerHTML='';}
 function filterCards(){
@@ -334,6 +477,8 @@ function filterCards(){
     if(store){show=show&&c.getAttribute('data-store')===store.getAttribute('data-store');}
     if(cat&&cat.getAttribute('data-c')!=='all'){
       if(cat.getAttribute('data-c')==='hot'){show=show&&c.getAttribute('data-hot')==='true';}
+      else if(cat.getAttribute('data-c')==='goldmine'){show=show&&parseFloat(c.getAttribute('data-profit'))>=30&&parseInt(c.getAttribute('data-score'))>=65;}
+      else if(cat.getAttribute('data-c')==='scalper'){show=show&&parseFloat(c.getAttribute('data-profit'))>=40&&parseInt(c.getAttribute('data-score'))>=80;}
       else if(cat.getAttribute('data-c')==='watchlist'){show=show&&wl[c.getAttribute('data-id')];}
       else{show=show&&c.getAttribute('data-c')===cat.getAttribute('data-c');}
     }
@@ -346,6 +491,7 @@ function filterCards(){
   if(sort==='profit'){cards.sort(function(a,b){return parseFloat(b.getAttribute('data-profit'))-parseFloat(a.getAttribute('data-profit'));});}
   else if(sort==='roi'){cards.sort(function(a,b){return parseFloat(b.getAttribute('data-roi'))-parseFloat(a.getAttribute('data-roi'));});}
   else if(sort==='discount'){cards.sort(function(a,b){return parseFloat(b.getAttribute('data-dp'))-parseFloat(a.getAttribute('data-dp'));});}
+  else if(sort==='newest'){cards.sort(function(a,b){return b.getAttribute('data-date')<a.getAttribute('data-date')?-1:1;});}
   var gr=document.getElementById('gr');
   cards.forEach(function(c){gr.appendChild(c);});
 }
@@ -414,15 +560,30 @@ def render_page(deals):
     def plat_price(base, pct): return round(base * pct, 2)
 
     cards, modal_items = "", []
-    cat_counts = {"hot": 0}
+    cat_counts = {"hot": 0, "goldmine": 0, "scalper": 0}
     from datetime import datetime
     now = datetime.utcnow().strftime("%b %d %H:%M UTC")
+    # Bundle detection
+    bundle_p = __import__("re").compile(r"(\d+)\s*(pack|pair|count|set|roll|bundle|lot|kit)", __import__("re").I)
 
     for d in deals:
+        m = bundle_p.search(d["title"])
+        units = int(m.group(1)) if m else 1
+        is_bundle = units > 1
+        profit = d.get("profit_est", 0)
+        score = d.get("flip_score", "C")
+        is_goldmine = profit >= 30 and score in ("S", "A")
         c = d.get("category", "other")
         cat_counts[c] = cat_counts.get(c, 0) + 1
         hot = is_hot(d["title"])
         if hot: cat_counts["hot"] += 1
+        profit = d.get("profit_est", 0)
+        score = d.get("flip_score", "C")
+        is_goldmine = profit >= 30 and score in ("S", "A")
+        if is_goldmine: cat_counts["goldmine"] += 1
+        roi_pct = d.get("roi_pct", 0)
+        is_scalper = profit >= 40 and score_num >= 80 if isinstance(score, int) else False
+        if is_scalper: cat_counts["scalper"] += 1
 
         store, title = d["store"], d["title"][:120]
         dp, cp = d["discount_pct"], d["current_price"]
@@ -444,11 +605,11 @@ def render_page(deals):
 
         modal_items.append({"id":d["id"],"title":d["title"][:120],"store":store,"cp":cp,"op":d["original_price"],"avg_r":avg_r,"min_r":min_r,"max_r":max_r,"profit":profit,"roi":roi,"sold":sold,"score":score,"dp":dp,"buy_url":buy_url,"si":si,"fc":fc,"fl":fl,"plat":plat,"best":best,"sell_urls":sell_urls,"stars":("⭐" if hot else "")})
 
-        cards += f"""<div class="dc" data-c="{c}" data-store="{store}" data-hot="{str(hot).lower()}" data-profit="{profit}" data-roi="{roi}" data-dp="{dp}" data-id="{d['id']}">
+        cards += f"""<div class="dc" data-c="{c}" data-store="{store}" data-hot="{str(hot).lower()}" data-profit="{profit}" data-roi="{roi}" data-dp="{dp}" data-id="{d['id']}" data-score="{score}" data-date="{now}">
   <div class="dc-h"><span class="dc-si">{si} {store.title()}</span><span class="dc-sc" style="background:{fc}">{score} {fl}</span><span class="wl-btn" onclick="event.stopPropagation();toggleWl(this)">🔖</span></div>
-  <div class="dc-t">{title}{' ⭐' if hot else ''}</div>
+  <div class="dc-t">{title}{' ⭐' if hot else ''}{' 📦' if is_bundle and units > 1 else ''}</div>
   <div class="dc-p">
-    <span class="dc-b">${cp:.0f}</span><span class="dc-ar">→</span><span class="dc-g">${avg_r:.0f}</span><span class="dc-r">($${min_r:.0f}-$${max_r:.0f})</span>
+    <span class="dc-b">${cp:.0f}</span><span class="dc-ar">→</span><span class="dc-g">${avg_r:.0f}</span><span class="dc-r">($${min_r:.0f}-$${max_r:.0f}){' $'+str(round(avg_r/units,1))+'/ea' if is_bundle and units > 1 else ''}</span>
     <span class="dc-d" style="background:{'#e57373' if dp>=50 else '#e8835a' if dp>=30 else '#555'}">-{dp:.0f}%</span>
   </div>
   <div class="dc-pr">
@@ -469,6 +630,10 @@ def render_page(deals):
     tabs = f'<button class="nb on" data-c="all">🔥 All <span class="ct">{len(deals)}</span></button>'
     if cat_counts.get("hot", 0) > 0:
         tabs += f'<button class="nb" data-c="hot">⭐ Top&nbsp;Demand <span class="ct">{cat_counts["hot"]}</span></button>'
+    if cat_counts.get("goldmine", 0) > 0:
+        tabs += f'<button class="nb" data-c="goldmine">💎 Goldmine <span class="ct">{cat_counts["goldmine"]}</span></button>'
+    if cat_counts.get("scalper", 0) > 0:
+        tabs += f'<button class="nb" data-c="scalper">🎯 Scalper <span class="ct">{cat_counts["scalper"]}</span></button>'
     tabs += f'<button class="nb" data-c="watchlist">🔖 Saved</button>'
     tabs += f'<a href="/dashboard" class="nb-dd" style="text-decoration:none">📊 Dash</a>'
     # Store tabs
@@ -482,7 +647,7 @@ def render_page(deals):
             tabs += f'<button class="nb" data-store="{s}">{store_icons.get(s,"🏪")} {s.title()} <span class="ct">{store_counts[s]}</span></button>'
     tabs += f'<button class="nb-dd" id="ddBtn">📂 Categories ▾</button>'
     tabs += f'<div class="dd" id="dd">{dd_items}</div>'
-    tabs += f'<div class="nv-s"><input id="sq" placeholder="🔍 Search" spellcheck="false"><select id="so"><option value="">Sort</option><option value="discount">% Off</option><option value="profit">💰 Profit</option><option value="roi">📈 ROI</option></select></div>'
+    tabs += f'<div class="nv-s"><input id="sq" placeholder="🔍 Search" spellcheck="false"><button class="nb" id="bcBtn" onclick="openBarcode()" style="font-size:.8em;padding:3px 8px">📷</button><select id="so"><option value="">Sort</option><option value="discount">% Off</option><option value="profit">💰 Profit</option><option value="roi">📈 ROI</option><option value="newest">🆕 Newest</option></select></div>'
 
     js_final = _JS.replace("MODAL_DATA_PLACEHOLDER", modal_json)
 
