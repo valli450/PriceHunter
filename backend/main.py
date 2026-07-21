@@ -41,6 +41,26 @@ def root():
 def list_deals(min_discount: float = 10, store: str = None, limit: int = 100):
     return get_hot_deals(limit=limit, min_discount=min_discount, store=store)
 
+@app.on_event("startup")
+def startup():
+    """Seed DB if empty."""
+    import json, os
+    from backend.database import init_db, get_conn, save_deal
+    init_db()
+    conn = get_conn()
+    count = conn.execute("SELECT COUNT(*) FROM deals").fetchone()[0]
+    conn.close()
+    if count == 0:
+        seed = os.path.join(os.path.dirname(__file__), "..", "seed.json")
+        if os.path.exists(seed):
+            with open(seed) as f:
+                for d in json.load(f):
+                    save_deal(d)
+            print(f"Seeded DB from seed.json")
+        else:
+            print(f"Seed file not found at {seed}")
+
+
 @app.get("/api/deals/hot", response_class=HTMLResponse)
 def hot_deals_html(min_discount: float = 0, store: str = None):
     deals = get_hot_deals(limit=200, min_discount=min_discount, store=store)
