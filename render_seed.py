@@ -12,10 +12,12 @@ if count == 0:
     if os.path.exists(seed_path):
         with open(seed_path) as f:
             deals = json.load(f)
+        saved = 0
         for d in deals:
             save_deal(d)
-        print(f"Seeded {len(deals)} deals")
+            saved += 1
+        print(f"Seeded {saved} deals from seed.json")
     else:
-        print("No seed.json found")
+        print(f"No seed.json found at {seed_path}")
 else:
     print(f"DB already has {count} deals, skipping seed")
