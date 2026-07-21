@@ -1,0 +1,14 @@
+{
+  "name": "PriceHunter",
+  "short_name": "PriceHunter",
+  "description": "Горячие скидки с аналитикой перепродажи — Best Buy, Walmart, Target, Amazon, Home Depot и ещё 8 магазинов",
+  "start_url": "/api/deals/hot",
+  "display": "standalone",
+  "background_color": "#0c0a0a",
+  "theme_color": "#ff6b35",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/api/icon?size=192", "sizes": "192x192", "type": "image/png" },
+    { "src": "/api/icon?size=512", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
