@@ -20,11 +20,12 @@ async def scrape_all_stores() -> List[Dict]:
     # ─── Playwright stores ───
     async with async_playwright() as pw:
         for name, fn in [
-            ("target", _scrape_target),
-            ("amazon", _scrape_amazon),
             ("walmart", _scrape_walmart),
-            ("costco", _scrape_costco),
+            ("target", _scrape_target),
+            ("bestbuy", _scrape_bestbuy),
+            ("macys", _scrape_macys),
             ("homedepot", _scrape_homedepot),
+            ("costco", _scrape_costco),
             ("lowes", _scrape_lowes),
         ]:
             print(f"[{datetime.now().isoformat()}] Scraping {name}...")

@@ -38,6 +38,8 @@ def send_deal_notifications(deals: List[Dict], subscribers: List[Dict]):
         for deal in deals:
             if deal["discount_pct"] < min_discount:
                 continue
+            if deal.get("store") == "amazon":
+                continue
             
             # Проверяем фильтры подписчика
             if subscriber.get("store") and deal["store"] != subscriber["store"]:
